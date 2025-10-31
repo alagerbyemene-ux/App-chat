@@ -11,6 +11,12 @@ const io = socketIo(server, {
     cors: { origin: '*' } // للسماح بالاتصال من أي مصدر
 });
 
+// ✅ متغيرات المستخدمين والغرف والأصدقاء
+let users = {};
+let rooms = {};
+let friendRequests = {}; 
+let friendsList = {};
+
 app.use(bodyParser.json());
 app.use(express.static('Uploads')); // لخدمة الملفات (صور، صوت) من مجلد Uploads
 
@@ -276,20 +282,98 @@ app.post('/api/competitions', (req, res) => {
     res.json(newCompetition);
 });
 
+// تعريف المالك
+const OWNER_EMAIL = "njdj9985@mail.com";
+const OWNER_PASSWORD = "Zxcvbnm.8";
+
 // API لتعيين رتبة
 app.post('/api/assign-rank', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
-    const admin = users.find(u => 'fake-token-' + u.id === token);
-    if (!admin || admin.role !== 'admin') return res.status(403).json({ error: 'غير مسموح' });
+    const currentUser = users.find(u => 'fake-token-' + u.id === token);
+
+    // التحقق من الصلاحيات
+    const isOwner = currentUser?.email === "njdj9985@mail.com";
+
+    if (!currentUser || !isOwner) {
+        return res.status(403).json({ error: 'غير مسموح - فقط المالك يمكنه تغيير الرتب' });
+    }
 
     const { userId, rank, reason } = req.body;
     const user = users.find(u => u.id === parseInt(userId));
-    if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
 
+    if (!user) {
+        return res.status(404).json({ error: 'المستخدم غير موجود' });
+    }
+
+    // التحقق من صحة الرتبة
+    const validRanks = ['vip', 'gold', 'silver', 'bronze', 'member', 'visitor'];
+    if (!validRanks.includes(rank)) {
+        return res.status(400).json({ error: 'رتبة غير صالحة' });
+    }
+
+    // تحديث الرتبة
     user.rank = rank;
-    res.json({ message: 'تم تعيين الرتبة' });
+
+    // حفظ السبب إذا تم تقديمه
+    if (reason) {
+        user.rankChangeReason = reason;
+        user.rankChangedAt = new Date().toISOString();
+        user.rankChangedBy = currentUser.email;
+    }
+
+    // إرسال الاستجابة
+    res.json({ 
+        message: 'تم تغيير الرتبة بنجاح',
+        user: {
+            id: user.id,
+            username: user.username,
+            rank: user.rank
+        }
+    });
+
+    // إرسال تحديث للمستخدمين المتصلين
     io.emit('userUpdated', user);
 });
+
+// API لإزالة الرتبة
+app.post('/api/remove-rank', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const currentUser = users.find(u => 'fake-token-' + u.id === token);
+
+    // التحقق من الصلاحيات
+    const isOwner = currentUser?.email === "njdj9985@mail.com";
+
+    if (!currentUser || !isOwner) {
+        return res.status(403).json({ error: 'غير مسموح - فقط المالك يمكنه إزالة الرتب' });
+    }
+
+    const { userId } = req.body;
+    const user = users.find(u => u.id === parseInt(userId));
+
+    if (!user) {
+        return res.status(404).json({ error: 'المستخدم غير موجود' });
+    }
+
+    // إزالة الرتبة
+    user.rank = 'visitor';
+    delete user.rankChangeReason;
+    delete user.rankChangedAt;
+    delete user.rankChangedBy;
+
+    // إرسال الاستجابة
+    res.json({ 
+        message: 'تم إزالة الرتبة بنجاح',
+        user: {
+            id: user.id,
+            username: user.username,
+            rank: user.rank
+        }
+    });
+
+    // إرسال تحديث للمستخدمين المتصلين
+    io.emit('userUpdated', user);
+});
+
 
 // API للحصول على قائمة المستخدمين
 app.get('/api/users', (req, res) => {
@@ -348,10 +432,46 @@ app.post('/api/mute', (req, res) => {
     io.emit('userMuted', { userId: user.id, reason, duration });
     res.json({ message: 'تم كتم المستخدم' });
 });
+// API لتجاهل مستخدم
+app.post('/api/ignore', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const currentUser = users.find(u => 'fake-token-' + u.id === token);
+    if (!currentUser) return res.status(401).json({ error: 'غير مصرح له' });
 
+    const { targetUserId } = req.body;
+    const targetId = parseInt(targetUserId);
+
+    const targetUser = users.find(u => u.id === targetId);
+    if (targetUser && targetUser.email === 'njdj9985@mail.com') {
+        return res.status(403).json({ error: 'لا يمكن تجاهل مالك الموقع' });
+    }
+
+    if (!currentUser.ignoredUsers) {
+        currentUser.ignoredUsers = [];
+    }
+
+    if (!currentUser.ignoredUsers.includes(targetId)) {
+        currentUser.ignoredUsers.push(targetId);
+    }
+
+    res.json({ message: 'تم تجاهل المستخدم', ignored: currentUser.ignoredUsers });
+});
 // Socket.IO للتواصل الفوري
 io.on('connection', (socket) => {
     console.log('مستخدم متصل: ' + socket.id);
+    io.on('connection', (socket) => {
+
+        // الأحداث الموجودة عندك...
+        socket.on('login', ...);
+        socket.on('message', ...);
+
+        // ⬇️ أضف كل أحداث طلبات الصداقة هنا (داخل connection)
+        socket.on('userLogin', (data) => { ... });
+        socket.on('sendFriendRequest', (data) => { ... });
+        socket.on('acceptFriendRequest', (data) => { ... });
+        socket.on('rejectFriendRequest', (data) => { ... });
+
+    }); // ⬅️ نهاية io.on('connection')
 
     // الانضمام إلى غرفة
     socket.on('join', (data) => {
@@ -709,4 +829,98 @@ setInterval(() => {
 // تشغيل الخادم
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-```
+// 🧹 API لمسح جميع رسائل غرفة
+app.delete('/api/rooms/:roomId/messages', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = users.find(u => 'fake-token-' + u.id === token);
+
+    if (!user || (user.role !== 'admin' && user.role !== 'owner')) {
+        return res.status(403).json({ error: 'غير مسموح - للإداريين فقط' });
+    }
+
+    const roomId = parseInt(req.params.roomId);
+    messages = messages.filter(m => m.roomId !== roomId); // حذف جميع الرسائل بالغرفة
+    io.to(roomId).emit('messagesCleared'); // إعلام العملاء أن الرسائل تم مسحها
+    res.json({ message: 'تم مسح جميع الرسائل في الغرفة' });
+});
+}); // ⬅️ نهاية io.on('connection')
+
+// ⬇️ أضف الدوال المساعدة هنا
+function findSocketByUserId(userId) {
+    const sockets = Array.from(io.sockets.sockets.values());
+    return sockets.find(s => s.userId === userId);
+}
+
+function getTimeAgo(timestamp) {
+    const seconds = Math.floor((Date.now() - timestamp) / 1000);
+
+    if (seconds < 60) return 'الآن';
+    if (seconds < 3600) return `منذ ${Math.floor(seconds / 60)} دقيقة`;
+    if (seconds < 86400) return `منذ ${Math.floor(seconds / 3600)} ساعة`;
+    return `منذ ${Math.floor(seconds / 86400)} يوم`;
+}
+
+// الكود الموجود عندك
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
+// دالة مساعدة للتحقق من المالك
+function isOwner(user) {
+    return user?.email === 'njdj9985@mail.com';
+}
+
+// API لتعيين رتبة - فقط المالك
+app.post('/api/assign-rank', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = users.find(u => 'fake-token-' + u.id === token);
+
+    if (!isOwner(user)) {
+        return res.status(403).json({ error: '❌ فقط المالك يمكنه تعيين الرتب' });
+    }
+
+    // باقي الكود...
+});
+
+// API لتعديل بروفايل أي مستخدم - فقط المالك
+app.put('/api/user/profile/:userId', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const admin = users.find(u => 'fake-token-' + u.id === token);
+
+    if (!isOwner(admin)) {
+        return res.status(403).json({ error: '❌ فقط المالك يمكنه تعديل بروفايلات الآخرين' });
+    }
+
+    const targetUser = users.find(u => u.id === parseInt(req.params.userId));
+    if (!targetUser) return res.status(404).json({ error: 'المستخدم غير موجود' });
+
+    // تحديث البيانات...
+    Object.assign(targetUser, req.body);
+    res.json(targetUser);
+});
+
+// API لعرض بروفايل - الكل يشوف المعلومات الأساسية فقط
+app.get('/api/user/profile/:userId', (req, res) => {
+    const user = users.find(u => u.id === parseInt(req.params.userId));
+    if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
+
+    // المالك يشوف كل شيء
+    const token = req.headers.authorization?.split(' ')[1];
+    const viewer = users.find(u => 'fake-token-' + u.id === token);
+
+    if (isOwner(viewer)) {
+        return res.json(user); // كل البيانات
+    }
+
+    // المستخدمين العاديين يشوفون فقط البيانات العامة
+    res.json({
+        id: user.id,
+        display_name: user.display_name,
+        age: user.age,
+        gender: user.gender,
+        country: user.country,
+        about_me: user.about_me,
+        profile_image1: user.profile_image1,
+        rank: user.rank
+    });
+});
