@@ -780,15 +780,15 @@ io.on('connection', (socket) => {
              new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
         if (isMuted) return socket.emit('error', 'أنت مكتوم ولا يمكنك إرسال الرسائل');
 
-        const message = { 
-            id: messages.length + 1, 
-            roomId: data.roomId, 
-            user_id: socket.user.userId, 
-            display_name: socket.user.display_name, 
-            rank: socket.user.rank, 
-            content: data.content, 
-            type: 'text', 
-            timestamp: new Date() 
+        const message = {
+            id: messages.length + 1,
+            roomId: data.roomId,
+            user_id: socket.user.userId,
+            display_name: socket.user.display_name,
+            rank: socket.user.rank,
+            content: data.message || data.content,
+            type: 'text',
+            timestamp: new Date()
         };
         messages.push(message);
         io.to(data.roomId).emit('newMessage', message);
