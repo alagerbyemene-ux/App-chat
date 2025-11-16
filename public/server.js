@@ -97,6 +97,7 @@ app.post('/api/register', (req, res) => {
     res.json({ token, user: newUser });
 });
 
+
 // API للحصول على بيانات الملف الشخصي
 app.get('/api/user/profile', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
@@ -987,3 +988,448 @@ app.post('/api/change-email', (req, res) => {
 
     res.json({ message: 'تم تغيير البريد الإلكتروني بنجاح', email: newEmail });
 });
+// ========================================
+// 🎮 أضف هذا الكود في server.js حقك
+// ========================================
+
+// في أعلى الملف مع باقي المتغيرات:
+let xoGames = {}; // تخزين حالة كل لعبة
+
+// ========================================
+// داخل io.on('connection', (socket) => {
+// أضف هذه الأحداث:
+// ========================================
+
+// 🆕 إنشاء لعبة جديدة
+socket.on('createXOGame', (data) => {
+    const gameId = 'game_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    const game = {
+        id: gameId,
+        mode: data.mode, // 'ai' أو 'friend'
+        player1: {
+            id: socket.id,
+            userId: data.userId,
+            name: data.playerName,
+            symbol: 'X'
+        },
+        player2: null,
+        board: Array(9).fill(null),
+        currentTurn: 'X',
+        winner: null,
+        status: 'waiting', // waiting, playing, finished
+        createdAt: new Date()
+    };
+
+    xoGames[gameId] = game;
+    socket.join(gameId);
+
+    // إرسال معلومات اللعبة للاعب الأول
+    socket.emit('gameCreated', {
+        gameId,
+        shareUrl: `${data.baseUrl || 'http://localhost:3000'}/xo.html?game=${gameId}`,
+        game
+    });
+
+    console.log(`✅ تم إنشاء لعبة XO: ${gameId}`);
+});
+
+// 🔗 الانضمام للعبة موجودة
+socket.on('joinXOGame', (data) => {
+    const game = xoGames[data.gameId];
+
+    if (!game) {
+        return socket.emit('gameError', { message: 'اللعبة غير موجودة' });
+    }
+
+    if (game.mode === 'ai') {
+        return socket.emit('gameError', { message: 'هذه لعبة ضد الكمبيوتر - لا يمكن الانضمام' });
+    }
+
+    if (game.player2) {
+        return socket.emit('gameError', { message: 'اللعبة ممتلئة' });
+    }
+
+    // إضافة اللاعب الثاني
+    game.player2 = {
+        id: socket.id,
+        userId: data.userId,
+        name: data.playerName,
+        symbol: 'O'
+    };
+    game.status = 'playing';
+
+    socket.join(data.gameId);
+
+    // إعلام الجميع ببدء اللعبة
+    io.to(data.gameId).emit('gameStarted', game);
+
+    console.log(`✅ انضم ${data.playerName} للعبة ${data.gameId}`);
+});
+
+// 🎯 تنفيذ حركة
+socket.on('makeXOMove', (data) => {
+    const game = xoGames[data.gameId];
+
+    if (!game) {
+        return socket.emit('gameError', { message: 'اللعبة غير موجودة' });
+    }
+
+    if (game.status !== 'playing') {
+        return socket.emit('gameError', { message: 'اللعبة لم تبدأ بعد' });
+    }
+
+    // التحقق من دور اللاعب
+    const isPlayer1 = socket.id === game.player1.id;
+    const isPlayer2 = game.player2 && socket.id === game.player2.id;
+    const playerSymbol = isPlayer1 ? 'X' : 'O';
+
+    if (game.currentTurn !== playerSymbol) {
+        return socket.emit('gameError', { message: 'ليس دورك!' });
+    }
+
+    // التحقق من أن الخانة فارغة
+    if (game.board[data.index] !== null) {
+        return socket.emit('gameError', { message: 'الخانة محجوزة!' });
+    }
+
+    // تنفيذ الحركة
+    game.board[data.index] = playerSymbol;
+
+    // فحص الفوز
+    const winner = checkWinner(game.board);
+    if (winner) {
+        game.winner = winner;
+        game.status = 'finished';
+        io.to(data.gameId).emit('gameOver', {
+            winner: winner === 'draw' ? 'draw' : (winner === 'X' ? game.player1 : game.player2),
+            board: game.board
+        });
+    } else {
+        // تغيير الدور
+        game.currentTurn = game.currentTurn === 'X' ? 'O' : 'X';
+
+        // إرسال التحديث للجميع
+        io.to(data.gameId).emit('boardUpdated', {
+            board: game.board,
+            currentTurn: game.currentTurn
+        });
+
+        // إذا كان اللعب مع الكمبيوتر
+        if (game.mode === 'ai' && game.currentTurn === 'O') {
+            setTimeout(() => {
+                makeAIMove(game, data.gameId);
+            }, 500);
+        }
+    }
+});
+
+// 🔄 إعادة اللعب
+socket.on('restartXOGame', (data) => {
+    const game = xoGames[data.gameId];
+    if (!game) return;
+
+    game.board = Array(9).fill(null);
+    game.currentTurn = 'X';
+    game.winner = null;
+    game.status = 'playing';
+
+    io.to(data.gameId).emit('gameRestarted', game);
+});
+
+// 🚪 مغادرة اللعبة
+socket.on('leaveXOGame', (data) => {
+    const game = xoGames[data.gameId];
+    if (!game) return;
+
+    socket.leave(data.gameId);
+    io.to(data.gameId).emit('playerLeft', {
+        message: 'اللاعب غادر اللعبة'
+    });
+
+    // حذف اللعبة بعد 5 دقائق
+    setTimeout(() => {
+        delete xoGames[data.gameId];
+    }, 5 * 60 * 1000);
+});
+
+// ========================================
+// 🤖 دالة الذكاء الاصطناعي (الكمبيوتر)
+// ========================================
+function makeAIMove(game, gameId) {
+    const emptyIndices = game.board
+        .map((val, idx) => val === null ? idx : null)
+        .filter(val => val !== null);
+
+    if (emptyIndices.length === 0) return;
+
+    // اختيار عشوائي (يمكن تطويره لذكاء أفضل)
+    const randomIndex = emptyIndices[Math.floor(Math.random() * emptyIndices.length)];
+    game.board[randomIndex] = 'O';
+
+    const winner = checkWinner(game.board);
+    if (winner) {
+        game.winner = winner;
+        game.status = 'finished';
+        io.to(gameId).emit('gameOver', {
+            winner: winner === 'draw' ? 'draw' : game.player2,
+            board: game.board
+        });
+    } else {
+        game.currentTurn = 'X';
+        io.to(gameId).emit('boardUpdated', {
+            board: game.board,
+            currentTurn: game.currentTurn
+        });
+    }
+}
+
+// ========================================
+// ✅ دالة فحص الفوز
+// ========================================
+function checkWinner(board) {
+    const lines = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8], // صفوف
+        [0, 3, 6], [1, 4, 7], [2, 5, 8], // أعمدة
+        [0, 4, 8], [2, 4, 6]             // أقطار
+    ];
+
+    for (let line of lines) {
+        const [a, b, c] = line;
+        if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+            return board[a]; // 'X' أو 'O'
+        }
+    }
+
+    // فحص التعادل
+    if (board.every(cell => cell !== null)) {
+        return 'draw';
+    }
+
+    return null;
+}
+// ========================================
+// 🔴 الجزء 1: أضف هذا في بداية ملف server.js
+// (بعد سطر: let xoGames = {};)
+// ========================================
+
+// 🆕 متغير الإعلانات - أضف هذا السطر
+let advertisements = [];
+
+// معلومات المالك - أضف هذه الأسطر
+const OWNER_EMAIL = "njdj9985@mail.com";
+const OWNER_PASSWORD = "Zxcvbnm.8";
+
+// الرتب - أضف هذا الكائن
+const RANKS = {
+    visitor: { name: 'Visitor', emoji: '👋', level: 0, color: '#888' },
+    bronze: { name: 'Bronze Member', emoji: '🥉', level: 1, color: '#cd7f32' },
+    silver: { name: 'Silver Member', emoji: '🥈', level: 2, color: '#c0c0c0' },
+    gold: { name: 'Gold Member', emoji: '🥇', level: 3, color: '#ffd700' },
+    diamond: { name: 'Diamond Member', emoji: '💎', level: 4, color: '#b9f2ff' },
+    moderator: { name: 'Moderator', emoji: '🛡️', level: 6, color: '#00bfff' },
+    admin: { name: 'Admin', emoji: '⚡', level: 7, color: 'linear-gradient(45deg, #ff6b35, #f093fb)' },
+    super: { name: 'Super', emoji: '⭐', level: 8, color: '#ffd700' },
+    legend: { name: 'Legend', emoji: '🌟', level: 9, color: '#8a2be2' },
+    chat_star: { name: 'Chat Owner', emoji: '🏆', level: 10, color: 'linear-gradient(45deg, #ffd700, #ff6b35)' }
+};
+
+// ========================================
+// 🔴 الجزء 2: دوال التحقق من الصلاحيات
+// أضف هذا بعد تعريف RANKS وقبل APIs
+// ========================================
+
+function isOwner(user) {
+    return user?.email === OWNER_EMAIL;
+}
+
+function canCreateAds(user) {
+    if (!user) return false;
+    if (isOwner(user)) return true;
+
+    const rank = RANKS[user.rank];
+    return rank && rank.level >= 6; // moderator فما فوق
+}
+
+// ========================================
+// 🔴 الجزء 3: APIs للإعلانات
+// أضف هذا بعد app.get('/api/users') وقبل io.on('connection')
+// ========================================
+
+// إنشاء إعلان رسمي (للمشرفين والإداريين)
+app.post('/api/advertisements', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = users.find(u => 'fake-token-' + u.id === token);
+
+    if (!canCreateAds(user)) {
+        return res.status(403).json({ error: '❌ هذه الميزة متاحة للمشرفين والإداريين فقط' });
+    }
+
+    const { title, content, duration } = req.body;
+
+    if (!title || !content) {
+        return res.status(400).json({ error: 'يجب إدخال العنوان والمحتوى' });
+    }
+
+    const newAd = {
+        id: advertisements.length + 1,
+        title,
+        content,
+        type: 'official',
+        creator_id: user.id,
+        creator_name: user.display_name,
+        creator_rank: user.rank,
+        duration: duration || 60,
+        created_at: new Date(),
+        active: true
+    };
+
+    advertisements.push(newAd);
+    io.emit('newAdvertisement', newAd);
+
+    res.json(newAd);
+});
+
+// إنشاء إعلان مجهول (للجميع)
+app.post('/api/advertisements/anonymous', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = users.find(u => 'fake-token-' + u.id === token);
+
+    if (!user) {
+        return res.status(401).json({ error: 'غير مصرح له' });
+    }
+
+    const { title, content, duration } = req.body;
+
+    if (!title || !content) {
+        return res.status(400).json({ error: 'يجب إدخال العنوان والمحتوى' });
+    }
+
+    const newAd = {
+        id: advertisements.length + 1,
+        title,
+        content,
+        type: 'anonymous',
+        creator_id: user.id,
+        creator_name: 'مجهول',
+        creator_rank: null,
+        duration: duration || 30,
+        created_at: new Date(),
+        active: true
+    };
+
+    advertisements.push(newAd);
+    io.emit('newAdvertisement', {
+        ...newAd,
+        creator_id: null
+    });
+
+    res.json({ message: 'تم نشر الإعلان بنجاح' });
+});
+
+// الحصول على الإعلانات النشطة
+app.get('/api/advertisements', (req, res) => {
+    const activeAds = advertisements.filter(ad => ad.active);
+    res.json(activeAds);
+});
+
+// حذف إعلان (فقط المشرفين والإداريين)
+app.delete('/api/advertisements/:id', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = users.find(u => 'fake-token-' + u.id === token);
+
+    if (!canCreateAds(user)) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
+
+    const adId = parseInt(req.params.id);
+    const adIndex = advertisements.findIndex(ad => ad.id === adId);
+
+    if (adIndex === -1) {
+        return res.status(404).json({ error: 'الإعلان غير موجود' });
+    }
+
+    advertisements.splice(adIndex, 1);
+    io.emit('advertisementDeleted', adId);
+
+    res.json({ message: 'تم حذف الإعلان' });
+});
+
+// ========================================
+// 🔴 الجزء 4: Socket.IO للإعلانات
+// أضف هذا **داخل** io.on('connection', (socket) => { 
+// وبعد socket.on('sendMessage')
+// ========================================
+
+    // 🆕 Socket للإعلانات
+    socket.on('createAdvertisement', (data) => {
+        const user = users.find(u => u.id === socket.user?.userId);
+
+        if (!canCreateAds(user)) {
+            return socket.emit('adError', { message: '❌ هذه الميزة متاحة للمشرفين والإداريين فقط' });
+        }
+
+        const newAd = {
+            id: advertisements.length + 1,
+            title: data.title,
+            content: data.content,
+            type: 'official',
+            creator_id: user.id,
+            creator_name: user.display_name,
+            creator_rank: user.rank,
+            duration: data.duration || 60,
+            created_at: new Date(),
+            active: true
+        };
+
+        advertisements.push(newAd);
+        io.emit('newAdvertisement', newAd);
+    });
+
+    socket.on('createAnonymousAd', (data) => {
+        const user = users.find(u => u.id === socket.user?.userId);
+
+        if (!user) return;
+
+        const newAd = {
+            id: advertisements.length + 1,
+            title: data.title,
+            content: data.content,
+            type: 'anonymous',
+            creator_id: user.id,
+            creator_name: 'مجهول',
+            creator_rank: null,
+            duration: data.duration || 30,
+            created_at: new Date(),
+            active: true
+        };
+
+        advertisements.push(newAd);
+        io.emit('newAdvertisement', {
+            ...newAd,
+            creator_id: null
+        });
+    });
+
+// ========================================
+// 🔴 ملاحظة مهمة:
+// تأكد أن مصفوفة users تحتوي على المالك:
+// ========================================
+/*
+users = [
+    { 
+        id: 1, 
+        display_name: 'Owner', 
+        rank: 'chat_star', 
+        role: 'owner', 
+        email: 'njdj9985@mail.com', 
+        password: 'Zxcvbnm.8', 
+        profile_image1: null, 
+        profile_image2: null, 
+        message_background: null, 
+        age: null, 
+        gender: null, 
+        marital_status: null, 
+        about_me: null 
+    }
+];
+*/
