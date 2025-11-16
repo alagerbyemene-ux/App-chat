@@ -3708,81 +3708,6 @@ async function loadMessages() {
     }
 }
 
-// عرض رسالة - النسخة المُصححة
-function displayMessage(message) {
-    const container = document.getElementById('messagesContainer');
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${message.user_id === currentUser?.id ? 'own' : ''}`;
-    messageDiv.setAttribute('data-message-id', message.id);
-
-    const rank = RANKS[message.rank] || RANKS.visitor;
-    const time = new Date(message.timestamp).toLocaleTimeString('ar-SA', {
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-
-    let messageContent = '';
-
-    // ✅ التحقق من نوع المحتوى
-        if (message.message || message.content) {
-        messageContent = `<div class="message-text">${escapeHtml(message.message)}</div>`;
-    } else if (message.voice_url) {
-        messageContent = `<audio class="message-audio" controls>
-            <source src="${message.voice_url}" type="audio/webm">
-            متصفحك لا يدعم تشغيل الصوت
-        </audio>`;
-    } else if (message.image_url) {
-        messageContent = `<img class="message-image" src="${message.image_url}" alt="صورة" onclick="openImageModal('${message.image_url}')">`;
-    }
-
-    messageDiv.innerHTML = `
-        <img class="message-avatar" 
-             src="${message.profile_image1 || 'https://images.pexels.com/photos/771742/pexels-photo-771742.jpeg?auto=compress&cs=tinysrgb&w=100&h=100&fit=crop'}" 
-             alt="صورة ${message.display_name}" 
-             onclick="openUserProfile(${message.user_id})">
-        <div class="message-content" style="${message.message_background ? `background-image: url(${message.message_background})` : ''}">
-            <div class="message-header">
-                <span class="message-author rank-${message.rank}" onclick="openUserProfile(${message.user_id})">${escapeHtml(message.display_name)}</span>
-                <span class="message-rank">${rank.emoji} ${rank.name}</span>
-                <span class="message-time">${time}</span>
-            </div>
-            ${messageContent}
-        </div>
-    `;
-
-    container.appendChild(messageDiv);
-    scrollToBottom();
-    console.log('✅ تم عرض الرسالة:', message);
-}
-// تحميل الرسائل
-async function loadMessages() {
-    try {
-        const token = localStorage.getItem('chatToken');
-        if (!token && !currentUser?.isGuest) return;
-
-        const headers = {};
-        if (token) {
-            headers['Authorization'] = `Bearer ${token}`;
-        }
-
-        const response = await fetch(`/api/messages/${currentRoom}`, { headers });
-
-        if (response.ok) {
-            const messages = await response.json();
-            const container = document.getElementById('messagesContainer');
-            container.innerHTML = '';
-
-            messages.forEach(message => {
-                displayMessage(message);
-            });
-
-            scrollToBottom();
-        }
-    } catch (error) {
-        console.error('خطأ في تحميل الرسائل:', error);
-    }
-}
-
 // عرض رسالة
 function displayMessage(message) {
     const container = document.getElementById('messagesContainer');
@@ -3799,7 +3724,7 @@ function displayMessage(message) {
     let messageContent = '';
 
     // محتوى الرسالة
-        if (message.message || message.content) {
+    if (message.message) {
         messageContent = `<div class="message-text">${escapeHtml(message.message)}</div>`;
     } else if (message.voice_url) {
         messageContent = `<audio class="message-audio" controls>
@@ -3827,46 +3752,35 @@ function displayMessage(message) {
     scrollToBottom();
 }
 
-// إرسال رسالة - الكود المُصحح
+// إرسال رسالة
 function sendMessage() {
     const input = document.getElementById('messageInput');
     const message = input.value.trim();
 
-    if (!message) {
-        console.warn('⚠️ الرسالة فارغة');
-        return;
-    }
+    if (!message) return;
 
     if (message.length > 1000) {
         showError('الرسالة طويلة جداً (الحد الأقصى 1000 حرف)');
         return;
     }
 
-    if (!socket || !socket.connected) {
-        showError('❌ لا يوجد اتصال بالخادم');
-        console.error('Socket غير متصل:', socket);
-        return;
+    if (socket) {
+        const messageData = {
+            message: message,
+            roomId: currentRoom
+        };
+
+        // إضافة الاقتباس إذا كان موجوداً
+        if (quotedMessage) {
+            messageData.quoted_message_id = quotedMessage.id;
+            messageData.quoted_author = quotedMessage.author;
+            messageData.quoted_content = quotedMessage.content;
+        }
+
+        socket.emit('sendMessage', messageData);
+        input.value = '';
+        cancelQuote();
     }
-
-    console.log('📤 جاري إرسال الرسالة:', message);
-
-    const messageData = {
-        content: message,  // ✅ هذا هو الصحيح
-        roomId: currentRoom
-    };
-
-    // إضافة الاقتباس إذا كان موجوداً
-    if (quotedMessage) {
-        messageData.quoted_message_id = quotedMessage.id;
-        messageData.quoted_author = quotedMessage.author;
-        messageData.quoted_content = quotedMessage.content;
-    }
-
-    socket.emit('sendMessage', messageData);
-    input.value = '';
-    cancelQuote();
-
-    console.log('✅ تم إرسال الرسالة بنجاح');
 }
 
 // رفع صورة
@@ -4328,62 +4242,198 @@ app.get('/api/private-messages/:userId', (req, res) => {
     ));
 });
 
-// API للحصول على الأخبار
-app.get('/api/news', (req, res) => {
-    res.json(news);
-});
+// فتح قسم الأخبار
+function openNewsSection() {
+    openModal('newsModal');
+    loadNews();
+    closeMainMenu();
+}
 
-// API لنشر خبر جديد
-app.post('/api/news', upload.single('newsFile'), (req, res) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    const user = users.find(u => 'fake-token-' + u.id === token);
-    if (!user) return res.status(401).json({ error: 'غير مصرح له' });
+// تحميل الأخبار
+async function loadNews() {
+    try {
+        const response = await fetch('/api/news');
+        if (response.ok) {
+            const news = await response.json();
+            displayNews(news);
+        }
+    } catch (error) {
+        console.error('خطأ في تحميل الأخبار:', error);
+    }
+}
 
-    const { content } = req.body;
-    if (!content && !req.file) return res.status(400).json({ error: 'يجب إدخال محتوى أو ملف' });
+// عرض الأخبار
+function displayNews(news) {
+    const container = document.getElementById('newsFeed');
+    container.innerHTML = '';
 
-    const media = req.file ? `/Uploads/${req.file.filename}` : null;
-    const newNews = {
-        id: news.length + 1,
-        content,
-        media,
-        user_id: user.id,
-        display_name: user.display_name,
-        timestamp: new Date(),
-        likes: [],
-        pinned: false // ←←← التعديل المصحح
-    };
-    news.push(newNews);
-    io.emit('newNews', newNews);
-    res.json(newNews);
-});
+    if (news.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--text-secondary);">لا توجد أخبار حالياً</p>';
+        return;
+    }
 
-// API للحصول على الستوريات (قصص اليوم فقط)
-app.get('/api/stories', (req, res) => {
-    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    res.json(stories.filter(s => new Date(s.timestamp) > oneDayAgo));
-});
+    news.forEach(item => {
+        const newsDiv = document.createElement('div');
+        newsDiv.className = 'news-item';
 
-// API لنشر ستوري جديد
-app.post('/api/stories', upload.single('storyImage'), (req, res) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    const user = users.find(u => 'fake-token-' + u.id === token);
-    if (!user) return res.status(401).json({ error: 'غير مصرح له' });
+        const time = new Date(item.timestamp).toLocaleString('ar-SA');
 
-    if (!req.file) return res.status(400).json({ error: 'يجب رفع صورة' });
+        newsDiv.innerHTML = `
+            <div class="news-header-info">
+                <img class="news-author-avatar" src="https://images.pexels.com/photos/771742/pexels-photo-771742.jpeg?auto=compress&cs=tinysrgb&w=100&h=100&fit=crop" alt="${item.display_name}">
+                <div class="news-author-info">
+                    <h4>${escapeHtml(item.display_name)}</h4>
+                    <span class="news-time">${time}</span>
+                </div>
+            </div>
+            <div class="news-content">${escapeHtml(item.content)}</div>
+            ${item.media ? `<div class="news-media"><img src="${item.media}" alt="صورة الخبر"></div>` : ''}
+        `;
 
-    const image = `/Uploads/${req.file.filename}`;
-    const newStory = {
-        id: stories.length + 1,
-        image,
-        user_id: user.id,
-        display_name: user.display_name,
-        timestamp: new Date()
-    };
-    stories.push(newStory);
-    io.emit('newStory', newStory);
-    res.json(newStory);
-});
+        container.appendChild(newsDiv);
+    });
+}
+
+// نشر خبر
+async function postNews() {
+    const content = document.getElementById('newsContentInput').value.trim();
+    const fileInput = document.getElementById('newsFileInput');
+
+    if (!content && !fileInput.files[0]) {
+        showError('يرجى كتابة محتوى أو اختيار ملف');
+        return;
+    }
+
+    const formData = new FormData();
+    if (content) formData.append('content', content);
+    if (fileInput.files[0]) formData.append('newsFile', fileInput.files[0]);
+
+    try {
+        showLoading(true);
+
+        const response = await fetch('/api/news', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('chatToken')}`
+            },
+            body: formData
+        });
+
+        if (response.ok) {
+            document.getElementById('newsContentInput').value = '';
+            fileInput.value = '';
+            loadNews();
+            showNotification('تم نشر الخبر بنجاح', 'success');
+        } else {
+            const data = await response.json();
+            showError(data.error || 'فشل في نشر الخبر');
+        }
+    } catch (error) {
+        showError('حدث خطأ في نشر الخبر');
+    } finally {
+        showLoading(false);
+    }
+}
+
+// إغلاق مودال الأخبار
+function closeNewsModal() {
+    closeModal('newsModal');
+}
+
+// فتح قسم القصص
+function openStoriesSection() {
+    openModal('storiesModal');
+    loadStories();
+    closeMainMenu();
+}
+
+// تحميل القصص
+async function loadStories() {
+    try {
+        const response = await fetch('/api/stories');
+        if (response.ok) {
+            const stories = await response.json();
+            displayStories(stories);
+        }
+    } catch (error) {
+        console.error('خطأ في تحميل القصص:', error);
+    }
+}
+
+// عرض القصص
+function displayStories(stories) {
+    const container = document.getElementById('storiesContainer');
+    container.innerHTML = '';
+
+    if (stories.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--text-secondary);">لا توجد قصص حالياً</p>';
+        return;
+    }
+
+    stories.forEach(story => {
+        const storyDiv = document.createElement('div');
+        storyDiv.className = 'story-item';
+        storyDiv.onclick = () => viewStory(story);
+
+        storyDiv.innerHTML = `<img src="${story.image}" alt="قصة ${story.display_name}">`;
+        container.appendChild(storyDiv);
+    });
+}
+
+// فتح مودال إضافة قصة
+function openAddStoryModal() {
+    openModal('addStoryModal');
+}
+
+// إغلاق مودال إضافة قصة
+function closeAddStoryModal() {
+    closeModal('addStoryModal');
+}
+
+// إضافة قصة
+async function addStory() {
+    const fileInput = document.getElementById('storyMediaInput');
+    const text = document.getElementById('storyTextInput').value.trim();
+
+    if (!fileInput.files[0]) {
+        showError('يرجى اختيار صورة أو فيديو');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('storyImage', fileInput.files[0]);
+    if (text) formData.append('text', text);
+
+    try {
+        showLoading(true);
+
+        const response = await fetch('/api/stories', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('chatToken')}`
+            },
+            body: formData
+        });
+
+        if (response.ok) {
+            closeAddStoryModal();
+            loadStories();
+            showNotification('تم إضافة القصة بنجاح', 'success');
+        } else {
+            const data = await response.json();
+            showError(data.error || 'فشل في إضافة القصة');
+        }
+    } catch (error) {
+        showError('حدث خطأ في إضافة القصة');
+    } finally {
+        showLoading(false);
+    }
+}
+
+// إغلاق مودال القصص
+function closeStoriesModal() {
+    closeModal('storiesModal');
+}
 
 // API للتعليقات
 app.post('/api/comments', (req, res) => {
@@ -8498,395 +8548,114 @@ function sendEmailChangeRequest(userId, newEmail) {
         alert('حدث خطأ أثناء الاتصال بالخادم');
     });
 }
-// ===== المتغيرات العامة =====
-let currentDecorationType = 'none';
-let currentBackgroundColor = '';
-let namePrefix = '';
-let nameSuffix = '';
+// عند تحميل الصفحة
+window.addEventListener('load', function() {
+  // ... الكود القديم ...
 
-// ===== لوحة الألوان (64 لون متدرج) =====
-const colorPalette = [
-    // الصف الأول - درجات الرمادي والبني
-    'linear-gradient(135deg, #4a4a4a 0%, #2c2c2c 100%)',
-    'linear-gradient(135deg, #6b8e23 0%, #556b2f 100%)',
-    'linear-gradient(135deg, #808000 0%, #6b6b00 100%)',
-    'linear-gradient(135deg, #daa520 0%, #b8860b 100%)',
-    'linear-gradient(135deg, #ff8c00 0%, #ff7f00 100%)',
-    'linear-gradient(135deg, #ff6347 0%, #ff4500 100%)',
-    'linear-gradient(135deg, #dc143c 0%, #b22222 100%)',
-    'linear-gradient(135deg, #8b0000 0%, #660000 100%)',
-
-    // الصف الثاني - درجات الأزرق والأخضر
-    'linear-gradient(135deg, #2f4f4f 0%, #1c3030 100%)',
-    'linear-gradient(135deg, #000080 0%, #000066 100%)',
-    'linear-gradient(135deg, #008080 0%, #006666 100%)',
-    'linear-gradient(135deg, #00ced1 0%, #00a8aa 100%)',
-    'linear-gradient(135deg, #00ff7f 0%, #00cc66 100%)',
-    'linear-gradient(135deg, #32cd32 0%, #28a428 100%)',
-    'linear-gradient(135deg, #7cfc00 0%, #66cc00 100%)',
-    'linear-gradient(135deg, #adff2f 0%, #8fcc26 100%)',
-
-    // الصف الثالث - درجات الوردي والأرجواني
-    'linear-gradient(135deg, #ffb6c1 0%, #ff99aa 100%)',
-    'linear-gradient(135deg, #ff69b4 0%, #ff4da6 100%)',
-    'linear-gradient(135deg, #ff1493 0%, #cc1077 100%)',
-    'linear-gradient(135deg, #c71585 0%, #a01166 100%)',
-    'linear-gradient(135deg, #da70d6 0%, #b85bb0 100%)',
-    'linear-gradient(135deg, #ba55d3 0%, #9944aa 100%)',
-    'linear-gradient(135deg, #9370db 0%, #7759b3 100%)',
-    'linear-gradient(135deg, #8a2be2 0%, #6d22b5 100%)',
-
-    // الصف الرابع - متدرجات مميزة
-    'linear-gradient(135deg, #ff7e5f 0%, #feb47b 100%)',
-    'linear-gradient(135deg, #00d2ff 0%, #3a7bd5 100%)',
-    'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-    'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-    'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-    'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-    'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-    'linear-gradient(135deg, #30cfd0 0%, #330867 100%)',
-
-    // الصف الخامس
-    'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)',
-    'linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%)',
-    'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)',
-    'linear-gradient(135deg, #ff6e7f 0%, #bfe9ff 100%)',
-    'linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%)',
-    'linear-gradient(135deg, #f77062 0%, #fe5196 100%)',
-    'linear-gradient(135deg, #fccb90 0%, #d57eeb 100%)',
-    'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)',
-
-    // الصف السادس
-    'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-    'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-    'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-    'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-    'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-    'linear-gradient(135deg, #30cfd0 0%, #330867 100%)',
-    'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)',
-    'linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%)',
-
-    // الصف السابع
-    'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)',
-    'linear-gradient(135deg, #ff6e7f 0%, #bfe9ff 100%)',
-    'linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%)',
-    'linear-gradient(135deg, #f77062 0%, #fe5196 100%)',
-    'linear-gradient(135deg, #fccb90 0%, #d57eeb 100%)',
-    'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)',
-    'linear-gradient(135deg, #000000 0%, #434343 100%)',
-    'linear-gradient(135deg, #56ab2f 0%, #a8e063 100%)',
-
-    // الصف الثامن
-    'linear-gradient(135deg, #fc4a1a 0%, #f7b733 100%)',
-    'linear-gradient(135deg, #8e2de2 0%, #4a00e0 100%)',
-    'linear-gradient(135deg, #ee0979 0%, #ff6a00 100%)',
-    'linear-gradient(135deg, #36d1dc 0%, #5b86e5 100%)',
-    'linear-gradient(135deg, #c471f5 0%, #fa71cd 100%)',
-    'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-    'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-    'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)'
-];
-
-// ===== إنشاء لوحة الألوان =====
-function createColorPalette() {
-    const grid = document.getElementById('colorPaletteGrid');
-    if (!grid) return;
-
-    colorPalette.forEach((gradient, index) => {
-        const colorItem = document.createElement('div');
-        colorItem.className = 'color-palette-item';
-        colorItem.style.background = gradient;
-        colorItem.dataset.gradient = gradient;
-
-        colorItem.addEventListener('click', function() {
-            selectBackgroundColor(this);
-        });
-
-        grid.appendChild(colorItem);
-    });
-}
-
-// ===== اختيار لون الخلفية =====
-function selectBackgroundColor(element) {
-    // إزالة التحديد من جميع العناصر
-    document.querySelectorAll('.color-palette-item').forEach(item => {
-        item.classList.remove('active');
-    });
-
-    // تحديد العنصر الحالي
-    element.classList.add('active');
-    currentBackgroundColor = element.dataset.gradient;
-
-    // تطبيق اللون على المعاينة
-    const preview = document.getElementById('previewText');
-    if (preview) {
-        preview.style.background = currentBackgroundColor;
-        preview.style.webkitBackgroundClip = 'text';
-        preview.style.webkitTextFillColor = 'transparent';
-        preview.style.backgroundClip = 'text';
-    }
-}
-
-// ===== تطبيق لون مخصص =====
-document.getElementById('btnCustomColor')?.addEventListener('click', function() {
-    const colorPicker = document.getElementById('customColorPicker');
-    colorPicker.click();
+  // 👇 أضف هذا السطر في النهاية
+  setLanguage(currentLang);
 });
-
-document.getElementById('btnSaveColor')?.addEventListener('click', function() {
-    const customColor = document.getElementById('customColorPicker').value;
-    const gradient = `linear-gradient(135deg, ${customColor} 0%, ${adjustColor(customColor, -30)} 100%)`;
-
-    currentBackgroundColor = gradient;
-
-    const preview = document.getElementById('previewText');
-    if (preview) {
-        preview.style.background = gradient;
-        preview.style.webkitBackgroundClip = 'text';
-        preview.style.webkitTextFillColor = 'transparent';
-        preview.style.backgroundClip = 'text';
-    }
-
-    // إزالة التحديد من الألوان المحددة مسبقاً
-    document.querySelectorAll('.color-palette-item').forEach(item => {
-        item.classList.remove('active');
+// ✅ تسجيل الدخول وحفظ التوكن
+async function loginUser(email, password) {
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
     });
-});
+    const data = await res.json();
 
-// ===== تعديل درجة اللون =====
-function adjustColor(color, percent) {
-    const num = parseInt(color.replace('#', ''), 16);
-    const amt = Math.round(2.55 * percent);
-    const R = (num >> 16) + amt;
-    const G = (num >> 8 & 0x00FF) + amt;
-    const B = (num & 0x0000FF) + amt;
-
-    return '#' + (0x1000000 + (R < 255 ? R < 1 ? 0 : R : 255) * 0x10000 +
-        (G < 255 ? G < 1 ? 0 : G : 255) * 0x100 +
-        (B < 255 ? B < 1 ? 0 : B : 255))
-        .toString(16).slice(1);
+    if (data.token) {
+      localStorage.setItem('token', data.token);
+      alert('✅ تم تسجيل الدخول بنجاح');
+      window.location.href = '/profile.html'; // انتقل لصفحة البروفايل
+    } else {
+      alert('❌ فشل تسجيل الدخول');
+    }
+  } catch (err) {
+    console.error(err);
+    alert('حدث خطأ أثناء تسجيل الدخول');
+  }
 }
 
-// ===== اختيار نوع الزخرفة =====
-document.querySelectorAll('.decoration-type-card').forEach(card => {
-    card.addEventListener('click', function() {
-        // إزالة التحديد من جميع البطاقات
-        document.querySelectorAll('.decoration-type-card').forEach(c => {
-            c.classList.remove('active');
-        });
+// ✅ دالة عرض معلومات الجهاز
+async function showDeviceInfo() {
+  const token = localStorage.getItem('token');
+  if (!token) {
+    alert('يجب تسجيل الدخول أولاً');
+    return;
+  }
 
-        // تحديد البطاقة الحالية
-        this.classList.add('active');
-        currentDecorationType = this.dataset.type;
-
-        // تحديث المعاينة
-        updatePreview();
+  try {
+    const response = await fetch('/api/user/profile/me', {
+      headers: { 'Authorization': 'Bearer ' + token }
     });
-});
+    const data = await response.json();
 
-// ===== إضافة رموز للاسم =====
-document.querySelectorAll('.symbol-btn').forEach(btn => {
-    btn.addEventListener('click', function() {
-        const symbol = this.dataset.symbol;
-        const nameInput = document.getElementById('nameInput');
-
-        if (nameInput) {
-            const cursorPos = nameInput.selectionStart;
-            const currentValue = nameInput.value;
-            const newValue = currentValue.slice(0, cursorPos) + symbol + currentValue.slice(cursorPos);
-
-            nameInput.value = newValue;
-            nameInput.focus();
-            nameInput.setSelectionRange(cursorPos + symbol.length, cursorPos + symbol.length);
-
-            updatePreview();
-        }
-    });
-});
-
-// ===== تحديث المعاينة =====
-function updatePreview() {
-    const nameInput = document.getElementById('nameInput');
-    const preview = document.getElementById('previewText');
-
-    if (!nameInput || !preview) return;
-
-    const name = nameInput.value || 'اسمك هنا';
-
-    // إزالة جميع كلاسات الزخرفة السابقة
-    preview.className = preview.className.replace(/decoration-\w+/g, '').trim();
-
-    // تطبيق الزخرفة الجديدة
-    if (currentDecorationType !== 'none') {
-        preview.classList.add(`decoration-${currentDecorationType}`);
+    if (data.device_info) {
+      const info = data.device_info;
+      const msg = `
+        📱 <b>نوع الجهاز:</b> ${info.deviceType}<br>
+        💻 <b>النظام:</b> ${info.os}<br>
+        🌐 <b>المتصفح:</b> ${info.browser}<br>
+        📶 <b>نوع الشبكة:</b> ${info.network}<br>
+        🕓 <b>آخر ظهور:</b> ${new Date(info.last_seen).toLocaleString()}
+      `;
+      showPopup('معلومات جهازك', msg);
+    } else {
+      showPopup('معلومات جهازك', 'لم يتم تسجيل معلومات الجهاز بعد 😅');
     }
-
-    // تحديث النص
-    preview.textContent = name;
-
-    // تطبيق الخلفية إذا كانت محددة
-    if (currentBackgroundColor) {
-        preview.style.background = currentBackgroundColor;
-        preview.style.webkitBackgroundClip = 'text';
-        preview.style.webkitTextFillColor = 'transparent';
-        preview.style.backgroundClip = 'text';
-    }
+  } catch (err) {
+    console.error(err);
+    showPopup('خطأ', 'حدث خطأ أثناء جلب المعلومات');
+  }
 }
 
-// ===== استماع لتغييرات الإدخال =====
-document.getElementById('nameInput')?.addEventListener('input', updatePreview);
-
-// ===== تطبيق الزخرفة =====
-function updateNameDecoration() {
-    const nameInput = document.getElementById('nameInput');
-    const name = nameInput?.value || 'اسمك هنا';
-
-    // حفظ البيانات في localStorage
-    const decorationData = {
-        name: name,
-        decorationType: currentDecorationType,
-        backgroundColor: currentBackgroundColor,
-        timestamp: Date.now()
-    };
-
-    localStorage.setItem('userNameDecoration', JSON.stringify(decorationData));
-
-    // إظهار رسالة نجاح
-    showSuccessMessage('✅ تم تطبيق الزخرفة بنجاح!');
-
-    // هنا يمكنك إضافة كود لتحديث الاسم في الملف الشخصي
-    console.log('Decoration Applied:', decorationData);
+// ✅ تصميم النافذة المنبثقة
+function showPopup(title, content) {
+  const popup = document.createElement('div');
+  popup.className = 'popup-overlay';
+  popup.innerHTML = `
+    <div class="popup-box">
+      <h3>${title}</h3>
+      <p>${content}</p>
+      <button onclick="this.parentElement.parentElement.remove()">إغلاق</button>
+    </div>
+  `;
+  document.body.appendChild(popup);
 }
 
-// ===== إعادة تعيين الزخرفة =====
-function resetDecoration() {
-    // إعادة تعيين القيم
-    currentDecorationType = 'none';
-    currentBackgroundColor = '';
-
-    // إعادة تعيين حقل الإدخال
-    const nameInput = document.getElementById('nameInput');
-    if (nameInput) {
-        nameInput.value = '';
-    }
-
-    // إعادة تعيين المعاينة
-    const preview = document.getElementById('previewText');
-    if (preview) {
-        preview.className = '';
-        preview.style.background = '';
-        preview.style.webkitBackgroundClip = '';
-        preview.style.webkitTextFillColor = 'white';
-        preview.textContent = 'اسمك هنا';
-    }
-
-    // إزالة التحديدات
-    document.querySelectorAll('.decoration-type-card').forEach(card => {
-        card.classList.remove('active');
-    });
-
-    document.querySelectorAll('.color-palette-item').forEach(item => {
-        item.classList.remove('active');
-    });
-
-    showSuccessMessage('🔄 تم إعادة التعيين بنجاح!');
+// ✅ تنسيقات CSS للنافذة
+const style = document.createElement('style');
+style.innerHTML = `
+.popup-overlay {
+  position: fixed;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
 }
-
-// ===== إظهار رسالة نجاح =====
-function showSuccessMessage(message) {
-    // إنشاء عنصر الرسالة
-    const msgDiv = document.createElement('div');
-    msgDiv.textContent = message;
-    msgDiv.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
-        color: white;
-        padding: 15px 25px;
-        border-radius: 10px;
-        font-weight: bold;
-        font-size: 16px;
-        box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-        z-index: 10000;
-        animation: slideIn 0.5s ease;
-    `;
-
-    document.body.appendChild(msgDiv);
-
-    // إزالة الرسالة بعد 3 ثواني
-    setTimeout(() => {
-        msgDiv.style.animation = 'slideOut 0.5s ease';
-        setTimeout(() => msgDiv.remove(), 500);
-    }, 3000);
+.popup-box {
+  background: #fff;
+  padding: 20px;
+  border-radius: 15px;
+  width: 320px;
+  text-align: center;
+  font-family: "Tajawal", sans-serif;
+  box-shadow: 0 0 15px rgba(0,0,0,0.2);
 }
-
-// ===== تحميل الزخرفة المحفوظة =====
-function loadSavedDecoration() {
-    const saved = localStorage.getItem('userNameDecoration');
-    if (saved) {
-        const data = JSON.parse(saved);
-
-        // استعادة الاسم
-        const nameInput = document.getElementById('nameInput');
-        if (nameInput && data.name) {
-            nameInput.value = data.name;
-        }
-
-        // استعادة نوع الزخرفة
-        if (data.decorationType) {
-            currentDecorationType = data.decorationType;
-            document.querySelectorAll('.decoration-type-card').forEach(card => {
-                if (card.dataset.type === data.decorationType) {
-                    card.classList.add('active');
-                }
-            });
-        }
-
-        // استعادة الخلفية
-        if (data.backgroundColor) {
-            currentBackgroundColor = data.backgroundColor;
-        }
-
-        // تحديث المعاينة
-        updatePreview();
-    }
+.popup-box h3 {
+  margin-bottom: 10px;
+  color: #333;
 }
-
-// ===== إضافة أنماط الحركة =====
-const styleSheet = document.createElement('style');
-styleSheet.textContent = `
-    @keyframes slideIn {
-        from {
-            transform: translateX(100%);
-            opacity: 0;
-        }
-        to {
-            transform: translateX(0);
-            opacity: 1;
-        }
-    }
-
-    @keyframes slideOut {
-        from {
-            transform: translateX(0);
-            opacity: 1;
-        }
-        to {
-            transform: translateX(100%);
-            opacity: 0;
-        }
-    }
+.popup-box button {
+  margin-top: 15px;
+  background: #3498db;
+  color: white;
+  border: none;
+  padding: 8px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+}
 `;
-document.head.appendChild(styleSheet);
-
-// ===== التهيئة عند تحميل الصفحة =====
-document.addEventListener('DOMContentLoaded', function() {
-    createColorPalette();
-    loadSavedDecoration();
-    updatePreview();
-});
-
-// تصدير الوظائف للاستخدام العام
-window.updateNameDecoration = updateNameDecoration;
-window.resetDecoration = resetDecoration;
+document.head.appendChild(style);
