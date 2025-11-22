@@ -6627,9 +6627,4 @@ textarea:focus {
         font-size: 14px;
     }
 }
-/* إخفاء النوافذ المنبثقة في شاشة الشات */
-#chatScreen .modal,
-#chatScreen .popup,
-#chatScreen .overlay {
-    display: none !important;
-}
+
