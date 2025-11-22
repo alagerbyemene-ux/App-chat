@@ -11,8 +11,10 @@ const io = socketIo(server, {
     cors: { origin: '*' }
 });
 
-let users = {};
-let rooms = {};
+let users = [];  // ✅ صحيح
+let rooms = [
+    { id: 1, name: 'الغرفة الرئيسية', description: 'غرفة عامة' }
+];
 let friendRequests = {}; 
 let friendsList = {};
 let messages = [];
@@ -727,11 +729,11 @@ io.on('connection', (socket) => {
         if (socket.currentRoom) {
             socket.leave(socket.currentRoom);
         }
-        
+
         // الانضمام للغرفة الجديدة
         socket.join(newRoomId);
         socket.currentRoom = newRoomId;
-        
+
         console.log(`المستخدم ${socket.user?.display_name} انتقل إلى الغرفة ${newRoomId}`);
     });
 
@@ -780,15 +782,15 @@ io.on('connection', (socket) => {
              new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
         if (isMuted) return socket.emit('error', 'أنت مكتوم ولا يمكنك إرسال الرسائل');
 
-        const message = {
-            id: messages.length + 1,
-            roomId: data.roomId,
-            user_id: socket.user.userId,
-            display_name: socket.user.display_name,
-            rank: socket.user.rank,
-            content: data.message || data.content,
-            type: 'text',
-            timestamp: new Date()
+        const message = { 
+            id: messages.length + 1, 
+            roomId: data.roomId, 
+            user_id: socket.user.userId, 
+            display_name: socket.user.display_name, 
+            rank: socket.user.rank, 
+            content: data.content, 
+            type: 'text', 
+            timestamp: new Date() 
         };
         messages.push(message);
         io.to(data.roomId).emit('newMessage', message);
@@ -810,13 +812,13 @@ io.on('connection', (socket) => {
             timestamp: new Date() 
         };
         privateMessages.push(message);
-        
+
         // إرسال للمستقبل باستخدام socket ID الصحيح
         const receiverSocket = findSocketByUserId(data.receiverId);
         if (receiverSocket) {
             receiverSocket.emit('newPrivateMessage', message);
         }
-        
+
         // إرسال للمرسل أيضاً
         socket.emit('newPrivateMessage', message);
     });
@@ -1217,5 +1219,4 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
-});
+    console.log(`Server running on port ${PORT}`);  // ✅
