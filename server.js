@@ -4,6 +4,7 @@ const socketIo = require('socket.io');
 const multer = require('multer');
 const path = require('path');
 const bodyParser = require('body-parser');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -11,9 +12,14 @@ const io = socketIo(server, {
     cors: { origin: '*' }
 });
 
-let users = [];  // ✅ صحيح
+// التأكد من وجود مجلد Uploads
+if (!fs.existsSync('Uploads')) {
+    fs.mkdirSync('Uploads');
+}
+
+let users = [];
 let rooms = [
-    { id: 1, name: 'الغرفة الرئيسية', description: 'غرفة عامة' }
+    { id: 1, name: 'الغرفة الرئيسية', description: 'غرفة عامة للجميع', background: null, ownerId: null, ownerName: 'النظام' }
 ];
 let friendRequests = {}; 
 let friendsList = {};
@@ -22,43 +28,104 @@ let privateMessages = [];
 let news = [];
 let stories = [];
 let bans = [];
+let permanentBans = [];
 let mutes = [];
 let floodProtection = new Map();
 let competitions = [];
 let comments = [];
 let xoGames = {};
 let advertisements = [];
+let onlineUsers = new Map();
+let roomKicks = [];
 
 app.use(bodyParser.json());
 app.use(express.static('public'));
 app.use('/uploads', express.static('Uploads'));
+app.use('/Uploads', express.static('Uploads'));
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'Uploads/'),
-    filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+    filename: (req, file, cb) => cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname))
 });
 const upload = multer({ 
     storage,
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: 10 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
-        const filetypes = /jpeg|jpg|png|webm/;
+        const filetypes = /jpeg|jpg|png|gif|webm|webp|mp3|wav|ogg/;
         const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-        const mimetype = filetypes.test(file.mimetype);
-        if (extname && mimetype) {
+        const mimetype = filetypes.test(file.mimetype) || file.mimetype.startsWith('image/') || file.mimetype.startsWith('audio/');
+        if (extname || mimetype) {
             return cb(null, true);
         } else {
-            cb(new Error('الملف يجب أن يكون صورة (jpeg/png) أو صوت (webm)'));
+            cb(new Error('الملف يجب أن يكون صورة أو صوت'));
         }
     }
 });
 
-const OWNER_EMAIL = "njdj9985@mail.com";
-const OWNER_PASSWORD = "Zxcvbnm.8";
+const OWNER_EMAIL = process.env.OWNER_EMAIL;
+const OWNER_PASSWORD = process.env.OWNER_PASSWORD;
+
+if (!OWNER_EMAIL || !OWNER_PASSWORD) {
+    console.error('خطأ: يجب تعيين OWNER_EMAIL و OWNER_PASSWORD في متغيرات البيئة');
+    console.error('مثال: OWNER_EMAIL=email@example.com OWNER_PASSWORD=password node server.js');
+    process.exit(1);
+}
+
+function isOwner(user) {
+    return user?.email === OWNER_EMAIL;
+}
+
+function canCreateAds(user) {
+    if (!user) return false;
+    return user.role === 'admin' || user.role === 'owner' || user.rank === 'vip' || user.rank === 'gold' || isOwner(user);
+}
+
+function isPermanentlyBanned(email) {
+    return permanentBans.some(ban => ban.email === email);
+}
+
+function getBanInfo(email) {
+    return permanentBans.find(ban => ban.email === email);
+}
 
 app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
-    const user = users.find(u => u.email === email && u.password === password);
+    
+    if (isPermanentlyBanned(email)) {
+        const banInfo = getBanInfo(email);
+        return res.status(403).json({ 
+            error: 'تم حظرك نهائياً من هذا الشات',
+            reason: banInfo?.reason || 'مخالفة القوانين',
+            bannedAt: banInfo?.timestamp
+        });
+    }
+    
+    let user = users.find(u => u.email === email && u.password === password);
+    
+    if (!user && email === OWNER_EMAIL && password === OWNER_PASSWORD) {
+        user = {
+            id: users.length + 1,
+            email: OWNER_EMAIL,
+            password: OWNER_PASSWORD,
+            display_name: 'مالك الموقع',
+            rank: 'chat_star',
+            role: 'admin',
+            profile_image1: null,
+            profile_image2: null,
+            message_background: null,
+            age: null,
+            gender: null,
+            marital_status: null,
+            about_me: 'مالك ومؤسس شات رعود الظلام'
+        };
+        users.push(user);
+    }
+    
     if (user) {
+        if (email === OWNER_EMAIL) {
+            user.role = 'admin';
+            user.rank = 'chat_star';
+        }
         const token = 'fake-token-' + user.id;
         res.json({ token, user });
     } else {
@@ -68,9 +135,17 @@ app.post('/api/login', (req, res) => {
 
 app.post('/api/register', (req, res) => {
     const { email, password, display_name } = req.body;
+    
+    if (isPermanentlyBanned(email)) {
+        return res.status(403).json({ 
+            error: 'تم حظر هذا البريد الإلكتروني نهائياً'
+        });
+    }
+    
     if (users.find(u => u.email === email)) {
         return res.status(400).json({ error: 'البريد الإلكتروني موجود مسبقًا' });
     }
+    
     const newUser = {
         id: users.length + 1,
         email,
@@ -114,9 +189,9 @@ app.put('/api/user/profile', upload.fields([
     if (marital_status) user.marital_status = marital_status;
     if (about_me) user.about_me = about_me;
 
-    if (req.files['profileImage1']) user.profile_image1 = `/Uploads/${req.files['profileImage1'][0].filename}`;
-    if (req.files['profileImage2']) user.profile_image2 = `/Uploads/${req.files['profileImage2'][0].filename}`;
-    if (req.files['messageBackground']) user.message_background = `/Uploads/${req.files['messageBackground'][0].filename}`;
+    if (req.files && req.files['profileImage1']) user.profile_image1 = `/Uploads/${req.files['profileImage1'][0].filename}`;
+    if (req.files && req.files['profileImage2']) user.profile_image2 = `/Uploads/${req.files['profileImage2'][0].filename}`;
+    if (req.files && req.files['messageBackground']) user.message_background = `/Uploads/${req.files['messageBackground'][0].filename}`;
 
     res.json(user);
     io.emit('userUpdated', user);
@@ -127,24 +202,81 @@ app.get('/api/rooms', (req, res) => res.json(rooms));
 app.post('/api/rooms', upload.single('roomBackground'), (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const user = users.find(u => 'fake-token-' + u.id === token);
-    if (!user || user.role !== 'admin') return res.status(403).json({ error: 'غير مسموح' });
+    if (!user || (!isOwner(user) && user.role !== 'admin')) {
+        return res.status(403).json({ error: 'غير مسموح - للمالك والإداريين فقط' });
+    }
 
-    const { name, description } = req.body;
+    const { name, description, ownerId } = req.body;
     const background = req.file ? `/Uploads/${req.file.filename}` : null;
-    const newRoom = { id: rooms.length + 1, name, description, background };
+    
+    let roomOwner = null;
+    let roomOwnerName = 'النظام';
+    
+    if (ownerId) {
+        roomOwner = users.find(u => u.id === parseInt(ownerId));
+        if (roomOwner) {
+            roomOwnerName = roomOwner.display_name;
+        }
+    }
+    
+    const newRoom = { 
+        id: rooms.length + 1, 
+        name, 
+        description: description || '', 
+        background,
+        ownerId: roomOwner ? roomOwner.id : null,
+        ownerName: roomOwnerName
+    };
     rooms.push(newRoom);
     io.emit('roomCreated', newRoom);
+    io.emit('roomsUpdated', rooms);
     res.json(newRoom);
+});
+
+app.put('/api/rooms/:id', upload.single('roomBackground'), (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = users.find(u => 'fake-token-' + u.id === token);
+    if (!user || (!isOwner(user) && user.role !== 'admin')) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
+
+    const roomId = parseInt(req.params.id);
+    const room = rooms.find(r => r.id === roomId);
+    if (!room) return res.status(404).json({ error: 'الغرفة غير موجودة' });
+
+    const { name, description, ownerId } = req.body;
+    if (name) room.name = name;
+    if (description !== undefined) room.description = description;
+    if (req.file) room.background = `/Uploads/${req.file.filename}`;
+    
+    if (ownerId) {
+        const roomOwner = users.find(u => u.id === parseInt(ownerId));
+        if (roomOwner) {
+            room.ownerId = roomOwner.id;
+            room.ownerName = roomOwner.display_name;
+        }
+    }
+
+    io.emit('roomUpdated', room);
+    io.emit('roomsUpdated', rooms);
+    res.json(room);
 });
 
 app.delete('/api/rooms/:id', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const user = users.find(u => 'fake-token-' + u.id === token);
-    if (!user || user.role !== 'admin') return res.status(403).json({ error: 'غير مسموح' });
+    if (!user || (!isOwner(user) && user.role !== 'admin')) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
 
     const roomId = parseInt(req.params.id);
+    if (roomId === 1) {
+        return res.status(400).json({ error: 'لا يمكن حذف الغرفة الرئيسية' });
+    }
+    
     rooms = rooms.filter(r => r.id !== roomId);
     io.emit('roomDeleted', roomId);
+    io.emit('roomsUpdated', rooms);
     res.json({ message: 'تم حذف الغرفة' });
 });
 
@@ -157,10 +289,169 @@ app.get('/api/private-messages/:userId', (req, res) => {
     const current = users.find(u => 'fake-token-' + u.id === token);
     if (!current) return res.status(401).json({ error: 'غير مصرح له' });
 
-    res.json(privateMessages.filter(pm => 
-        (pm.senderId === current.id && pm.receiverId === parseInt(req.params.userId)) || 
-        (pm.senderId === parseInt(req.params.userId) && pm.receiverId === current.id)
-    ));
+    const otherUserId = parseInt(req.params.userId);
+    const relevantMessages = privateMessages.filter(pm => 
+        (pm.senderId === current.id && pm.receiverId === otherUserId) || 
+        (pm.senderId === otherUserId && pm.receiverId === current.id)
+    );
+    res.json(relevantMessages);
+});
+
+app.get('/api/private-conversations', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const current = users.find(u => 'fake-token-' + u.id === token);
+    if (!current) return res.status(401).json({ error: 'غير مصرح له' });
+
+    const conversations = new Map();
+    
+    privateMessages.forEach(pm => {
+        let otherUserId;
+        if (pm.senderId === current.id) {
+            otherUserId = pm.receiverId;
+        } else if (pm.receiverId === current.id) {
+            otherUserId = pm.senderId;
+        } else {
+            return;
+        }
+        
+        if (!conversations.has(otherUserId) || new Date(pm.timestamp) > new Date(conversations.get(otherUserId).lastMessage.timestamp)) {
+            const otherUser = users.find(u => u.id === otherUserId);
+            conversations.set(otherUserId, {
+                userId: otherUserId,
+                display_name: otherUser?.display_name || 'مستخدم محذوف',
+                profile_image1: otherUser?.profile_image1,
+                rank: otherUser?.rank,
+                lastMessage: pm,
+                unreadCount: privateMessages.filter(m => m.senderId === otherUserId && m.receiverId === current.id && !m.read).length
+            });
+        }
+    });
+    
+    res.json(Array.from(conversations.values()));
+});
+
+app.get('/api/online-users', (req, res) => {
+    const onlineUsersList = Array.from(onlineUsers.values()).map(u => ({
+        id: u.userId,
+        display_name: u.display_name,
+        rank: u.rank,
+        profile_image1: u.profile_image1,
+        currentRoom: u.currentRoom
+    }));
+    res.json(onlineUsersList);
+});
+
+app.post('/api/permanent-ban', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const admin = users.find(u => 'fake-token-' + u.id === token);
+    
+    if (!isOwner(admin)) {
+        return res.status(403).json({ error: 'فقط مالك الموقع يمكنه الحظر النهائي' });
+    }
+
+    const { userId, reason } = req.body;
+    const targetUser = users.find(u => u.id === parseInt(userId));
+    
+    if (!targetUser) {
+        return res.status(404).json({ error: 'المستخدم غير موجود' });
+    }
+    
+    if (targetUser.email === OWNER_EMAIL) {
+        return res.status(400).json({ error: 'لا يمكن حظر مالك الموقع' });
+    }
+
+    permanentBans.push({
+        id: permanentBans.length + 1,
+        email: targetUser.email,
+        userId: targetUser.id,
+        display_name: targetUser.display_name,
+        reason: reason || 'مخالفة قوانين الشات',
+        timestamp: new Date(),
+        bannedBy: admin.display_name
+    });
+
+    const targetSocket = findSocketByUserId(targetUser.id);
+    if (targetSocket) {
+        targetSocket.emit('permanentlyBanned', { reason: reason || 'مخالفة قوانين الشات' });
+        targetSocket.disconnect();
+    }
+
+    io.emit('userPermanentlyBanned', { 
+        userId: targetUser.id, 
+        display_name: targetUser.display_name,
+        reason 
+    });
+    
+    res.json({ message: `تم حظر ${targetUser.display_name} نهائياً` });
+});
+
+app.delete('/api/permanent-ban/:id', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const admin = users.find(u => 'fake-token-' + u.id === token);
+    
+    if (!isOwner(admin)) {
+        return res.status(403).json({ error: 'فقط مالك الموقع يمكنه إلغاء الحظر' });
+    }
+
+    const banId = parseInt(req.params.id);
+    permanentBans = permanentBans.filter(b => b.id !== banId);
+    
+    res.json({ message: 'تم إلغاء الحظر' });
+});
+
+app.get('/api/permanent-bans', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const admin = users.find(u => 'fake-token-' + u.id === token);
+    
+    if (!isOwner(admin)) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
+
+    res.json(permanentBans);
+});
+
+app.post('/api/kick-from-room', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const admin = users.find(u => 'fake-token-' + u.id === token);
+    
+    if (!admin || (!isOwner(admin) && admin.role !== 'admin')) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
+
+    const { userId, roomId, reason } = req.body;
+    const targetUser = users.find(u => u.id === parseInt(userId));
+    const room = rooms.find(r => r.id === parseInt(roomId));
+    
+    if (!targetUser) return res.status(404).json({ error: 'المستخدم غير موجود' });
+    if (!room) return res.status(404).json({ error: 'الغرفة غير موجودة' });
+
+    roomKicks.push({
+        id: roomKicks.length + 1,
+        userId: targetUser.id,
+        roomId: room.id,
+        reason: reason || 'طرد من الغرفة',
+        timestamp: new Date(),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+    });
+
+    const targetSocket = findSocketByUserId(targetUser.id);
+    if (targetSocket && targetSocket.currentRoom === roomId) {
+        targetSocket.leave(roomId);
+        targetSocket.currentRoom = 1;
+        targetSocket.join(1);
+        targetSocket.emit('kickedFromRoom', { 
+            roomId, 
+            roomName: room.name,
+            reason: reason || 'تم طردك من هذه الغرفة' 
+        });
+    }
+
+    io.to(roomId).emit('userKicked', { 
+        userId: targetUser.id, 
+        display_name: targetUser.display_name 
+    });
+    
+    res.json({ message: `تم طرد ${targetUser.display_name} من ${room.name}` });
 });
 
 app.get('/api/news', (req, res) => {
@@ -246,7 +537,9 @@ app.get('/api/comments/:postId', (req, res) => {
 app.post('/api/competitions', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const user = users.find(u => 'fake-token-' + u.id === token);
-    if (!user || user.role !== 'admin') return res.status(403).json({ error: 'غير مسموح' });
+    if (!user || (!isOwner(user) && user.role !== 'admin')) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
 
     const { title, duration } = req.body;
     const newCompetition = {
@@ -276,12 +569,15 @@ app.post('/api/assign-rank', (req, res) => {
         return res.status(404).json({ error: 'المستخدم غير موجود' });
     }
 
-    const validRanks = ['vip', 'gold', 'silver', 'bronze', 'member', 'visitor'];
+    const validRanks = ['visitor', 'bronze', 'silver', 'gold', 'diamond', 'crown', 'moderator', 'admin', 'super', 'legend', 'chat_star', 'vip'];
     if (!validRanks.includes(rank)) {
         return res.status(400).json({ error: 'رتبة غير صالحة' });
     }
 
     user.rank = rank;
+    if (rank === 'admin' || rank === 'moderator') {
+        user.role = 'admin';
+    }
 
     if (reason) {
         user.rankChangeReason = reason;
@@ -293,7 +589,7 @@ app.post('/api/assign-rank', (req, res) => {
         message: 'تم تغيير الرتبة بنجاح',
         user: {
             id: user.id,
-            username: user.username,
+            display_name: user.display_name,
             rank: user.rank
         }
     });
@@ -317,6 +613,7 @@ app.post('/api/remove-rank', (req, res) => {
     }
 
     user.rank = 'visitor';
+    user.role = 'user';
     delete user.rankChangeReason;
     delete user.rankChangedAt;
     delete user.rankChangedBy;
@@ -325,7 +622,7 @@ app.post('/api/remove-rank', (req, res) => {
         message: 'تم إزالة الرتبة بنجاح',
         user: {
             id: user.id,
-            username: user.username,
+            display_name: user.display_name,
             rank: user.rank
         }
     });
@@ -338,18 +635,22 @@ app.get('/api/users', (req, res) => {
         id: u.id,
         display_name: u.display_name,
         rank: u.rank,
+        role: u.role,
         profile_image1: u.profile_image1,
         age: u.age,
         gender: u.gender,
         marital_status: u.marital_status,
-        about_me: u.about_me
+        about_me: u.about_me,
+        isOnline: onlineUsers.has(u.id)
     })));
 });
 
 app.post('/api/ban', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const admin = users.find(u => 'fake-token-' + u.id === token);
-    if (!admin || admin.role !== 'admin') return res.status(403).json({ error: 'غير مسموح' });
+    if (!admin || (!isOwner(admin) && admin.role !== 'admin')) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
 
     const { userId, reason, duration } = req.body;
     const user = users.find(u => u.id === parseInt(userId));
@@ -370,7 +671,9 @@ app.post('/api/ban', (req, res) => {
 app.post('/api/mute', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const admin = users.find(u => 'fake-token-' + u.id === token);
-    if (!admin || admin.role !== 'admin') return res.status(403).json({ error: 'غير مسموح' });
+    if (!admin || (!isOwner(admin) && admin.role !== 'admin')) {
+        return res.status(403).json({ error: 'غير مسموح' });
+    }
 
     const { userId, reason, duration } = req.body;
     const user = users.find(u => u.id === parseInt(userId));
@@ -392,13 +695,13 @@ app.delete('/api/rooms/:roomId/messages', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const user = users.find(u => 'fake-token-' + u.id === token);
 
-    if (!user || (user.role !== 'admin' && user.role !== 'owner')) {
+    if (!user || (!isOwner(user) && user.role !== 'admin')) {
         return res.status(403).json({ error: 'غير مسموح - للإداريين فقط' });
     }
 
     const roomId = parseInt(req.params.roomId);
     messages = messages.filter(m => m.roomId !== roomId);
-    io.to(roomId).emit('messagesCleared');
+    io.to(roomId.toString()).emit('messagesCleared');
     res.json({ message: 'تم مسح جميع الرسائل في الغرفة' });
 });
 
@@ -407,7 +710,7 @@ app.put('/api/user/profile/:userId', (req, res) => {
     const admin = users.find(u => 'fake-token-' + u.id === token);
 
     if (!isOwner(admin)) {
-        return res.status(403).json({ error: '❌ فقط المالك يمكنه تعديل بروفايلات الآخرين' });
+        return res.status(403).json({ error: 'فقط المالك يمكنه تعديل بروفايلات الآخرين' });
     }
 
     const targetUser = users.find(u => u.id === parseInt(req.params.userId));
@@ -436,7 +739,8 @@ app.get('/api/user/profile/:userId', (req, res) => {
         country: user.country,
         about_me: user.about_me,
         profile_image1: user.profile_image1,
-        rank: user.rank
+        rank: user.rank,
+        isOnline: onlineUsers.has(user.id)
     });
 });
 
@@ -519,7 +823,7 @@ app.post('/api/advertisements', (req, res) => {
     const user = users.find(u => 'fake-token-' + u.id === token);
 
     if (!canCreateAds(user)) {
-        return res.status(403).json({ error: '❌ هذه الميزة متاحة للمشرفين والإداريين فقط' });
+        return res.status(403).json({ error: 'هذه الميزة متاحة للمشرفين والإداريين فقط' });
     }
 
     const { title, content, duration } = req.body;
@@ -609,10 +913,21 @@ app.delete('/api/advertisements/:id', (req, res) => {
     res.json({ message: 'تم حذف الإعلان' });
 });
 
+app.post('/api/upload', upload.single('file'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'لم يتم رفع أي ملف' });
+    }
+    res.json({ url: `/Uploads/${req.file.filename}` });
+});
+
 function parseDuration(duration) {
     const map = {
         '5m': 5 * 60 * 1000,
+        '15m': 15 * 60 * 1000,
+        '30m': 30 * 60 * 1000,
         '1h': 60 * 60 * 1000,
+        '6h': 6 * 60 * 60 * 1000,
+        '12h': 12 * 60 * 60 * 1000,
         '24h': 24 * 60 * 60 * 1000,
         '7d': 7 * 24 * 60 * 60 * 1000,
         'permanent': Infinity
@@ -632,15 +947,6 @@ function getTimeAgo(timestamp) {
     if (seconds < 3600) return `منذ ${Math.floor(seconds / 60)} دقيقة`;
     if (seconds < 86400) return `منذ ${Math.floor(seconds / 3600)} ساعة`;
     return `منذ ${Math.floor(seconds / 86400)} يوم`;
-}
-
-function isOwner(user) {
-    return user?.email === OWNER_EMAIL;
-}
-
-function canCreateAds(user) {
-    if (!user) return false;
-    return user.role === 'admin' || user.role === 'owner' || user.rank === 'vip' || user.rank === 'gold';
 }
 
 function makeAIMove(game, gameId) {
@@ -711,33 +1017,80 @@ setInterval(() => {
         }
         return true;
     });
+    
+    roomKicks = roomKicks.filter(kick => {
+        if (kick.expiresAt && now > new Date(kick.expiresAt)) {
+            return false;
+        }
+        return true;
+    });
 }, 30000);
 
 io.on('connection', (socket) => {
     console.log('مستخدم متصل: ' + socket.id);
 
     socket.on('join', (data) => {
-        socket.join(data.roomId);
+        const kick = roomKicks.find(k => k.userId === data.userId && k.roomId === data.roomId && new Date() < new Date(k.expiresAt));
+        let targetRoom = data.roomId;
+        
+        if (kick) {
+            socket.emit('kickedFromRoom', { 
+                roomId: data.roomId, 
+                reason: kick.reason || 'أنت مطرود من هذه الغرفة'
+            });
+            targetRoom = 1;
+        }
+        
+        socket.join(targetRoom.toString());
         socket.user = data;
-        socket.currentRoom = data.roomId;
+        socket.currentRoom = targetRoom;
+        
+        const userInfo = {
+            socketId: socket.id,
+            userId: data.userId,
+            display_name: data.display_name,
+            rank: data.rank,
+            profile_image1: data.profile_image1,
+            currentRoom: targetRoom
+        };
+        onlineUsers.set(data.userId, userInfo);
+        
         io.emit('userList', users.filter(u => u.id !== socket.user.userId));
+        io.emit('onlineUsersUpdated', Array.from(onlineUsers.values()));
     });
 
-    // تبديل الغرفة
     socket.on('changeRoom', (newRoomId) => {
-        // مغادرة الغرفة الحالية
+        const kick = roomKicks.find(k => k.userId === socket.user?.userId && k.roomId === newRoomId && new Date() < new Date(k.expiresAt));
+        if (kick) {
+            socket.emit('kickedFromRoom', { 
+                roomId: newRoomId, 
+                reason: kick.reason || 'أنت مطرود من هذه الغرفة'
+            });
+            return;
+        }
+        
         if (socket.currentRoom) {
-            socket.leave(socket.currentRoom);
+            socket.leave(socket.currentRoom.toString());
         }
 
-        // الانضمام للغرفة الجديدة
-        socket.join(newRoomId);
+        socket.join(newRoomId.toString());
         socket.currentRoom = newRoomId;
+        
+        if (socket.user) {
+            const userInfo = onlineUsers.get(socket.user.userId);
+            if (userInfo) {
+                userInfo.currentRoom = newRoomId;
+                onlineUsers.set(socket.user.userId, userInfo);
+            }
+        }
 
+        io.emit('onlineUsersUpdated', Array.from(onlineUsers.values()));
         console.log(`المستخدم ${socket.user?.display_name} انتقل إلى الغرفة ${newRoomId}`);
     });
 
     socket.on('sendMessage', (data) => {
+        if (!socket.user) return;
+        
         const userId = socket.user.userId;
         const now = Date.now();
 
@@ -768,7 +1121,7 @@ io.on('connection', (socket) => {
                 timestamp: new Date()
             };
             messages.push(muteMessage);
-            io.to(data.roomId).emit('newMessage', muteMessage);
+            io.to(data.roomId.toString()).emit('newMessage', muteMessage);
 
             socket.emit('error', 'تم كتمك لمدة 5 دقائق بسبب الرسائل السريعة والمتكررة');
             return;
@@ -787,157 +1140,175 @@ io.on('connection', (socket) => {
             roomId: data.roomId, 
             user_id: socket.user.userId, 
             display_name: socket.user.display_name, 
-            rank: socket.user.rank, 
+            rank: socket.user.rank,
+            profile_image1: socket.user.profile_image1,
             content: data.content, 
-            type: 'text', 
+            type: data.type || 'text',
+            image_url: data.image_url,
+            voice_url: data.voice_url,
+            quotedMessage: data.quotedMessage,
             timestamp: new Date() 
         };
         messages.push(message);
-        io.to(data.roomId).emit('newMessage', message);
+        io.to(data.roomId.toString()).emit('newMessage', message);
     });
 
     socket.on('sendPrivateMessage', (data) => {
+        if (!socket.user) return;
+        
         const isMuted = mutes.find(m => m.user_id === socket.user.userId && 
             (m.duration === 'permanent' || new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
         if (isMuted) return socket.emit('error', 'أنت مكتوم ولا يمكنك إرسال الرسائل');
 
         const message = { 
             id: privateMessages.length + 1, 
-            senderId: socket.user.userId, 
-            display_name: socket.user.display_name, 
-            rank: socket.user.rank, 
+            senderId: socket.user.userId,
+            senderName: socket.user.display_name,
+            senderRank: socket.user.rank,
+            senderImage: socket.user.profile_image1,
             receiverId: data.receiverId, 
             content: data.content, 
-            type: 'text', 
+            type: data.type || 'text',
+            image_url: data.image_url,
+            voice_url: data.voice_url,
+            read: false,
             timestamp: new Date() 
         };
         privateMessages.push(message);
 
-        // إرسال للمستقبل باستخدام socket ID الصحيح
         const receiverSocket = findSocketByUserId(data.receiverId);
         if (receiverSocket) {
             receiverSocket.emit('newPrivateMessage', message);
         }
 
-        // إرسال للمرسل أيضاً
         socket.emit('newPrivateMessage', message);
     });
 
-    socket.on('sendImage', (data, callback) => {
-        upload.single('image')(data, {}, (err) => {
-            if (err) {
-                console.error('Error uploading image:', err.message);
-                return callback({ error: 'فشل رفع الصورة: ' + err.message });
+    socket.on('markPrivateMessagesRead', (data) => {
+        if (!socket.user) return;
+        
+        privateMessages.forEach(pm => {
+            if (pm.senderId === data.senderId && pm.receiverId === socket.user.userId) {
+                pm.read = true;
             }
-            const isMuted = mutes.find(m => m.user_id === socket.user.userId && 
-                (m.duration === 'permanent' || new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
-            if (isMuted) return callback({ error: 'أنت مكتوم ولا يمكنك إرسال الصور' });
-
-            const imageUrl = `/Uploads/${data.file.filename}`;
-            const message = { 
-                id: messages.length + 1, 
-                image_url: imageUrl, 
-                type: 'image', 
-                roomId: data.roomId, 
-                user_id: socket.user.userId, 
-                display_name: socket.user.display_name, 
-                rank: socket.user.rank, 
-                timestamp: new Date() 
-            };
-            messages.push(message);
-            io.to(data.roomId).emit('newImage', message);
-            callback({ success: true, imageUrl });
         });
     });
 
-    socket.on('sendPrivateImage', (data, callback) => {
-        upload.single('image')(data, {}, (err) => {
-            if (err) {
-                console.error('Error uploading private image:', err.message);
-                return callback({ error: 'فشل رفع الصورة: ' + err.message });
-            }
-            const isMuted = mutes.find(m => m.user_id === socket.user.userId && 
-                (m.duration === 'permanent' || new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
-            if (isMuted) return callback({ error: 'أنت مكتوم ولا يمكنك إرسال الصور' });
+    socket.on('getOnlineUsers', () => {
+        socket.emit('onlineUsersUpdated', Array.from(onlineUsers.values()));
+    });
 
-            const imageUrl = `/Uploads/${data.file.filename}`;
-            const message = { 
-                id: privateMessages.length + 1, 
-                image_url: imageUrl, 
-                type: 'image', 
-                receiverId: data.receiverId, 
-                user_id: socket.user.userId, 
-                display_name: socket.user.display_name, 
-                rank: socket.user.rank, 
-                timestamp: new Date() 
-            };
-            privateMessages.push(message);
-            socket.to(data.receiverId).emit('newPrivateImage', message);
-            socket.emit('newPrivateImage', message);
-            callback({ success: true, imageUrl });
-        });
+    socket.on('getRooms', () => {
+        socket.emit('roomsUpdated', rooms);
+    });
+
+    socket.on('sendImage', (data, callback) => {
+        if (!socket.user) return callback?.({ error: 'غير مصرح' });
+        
+        const isMuted = mutes.find(m => m.user_id === socket.user.userId && 
+            (m.duration === 'permanent' || new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
+        if (isMuted) return callback?.({ error: 'أنت مكتوم ولا يمكنك إرسال الصور' });
+
+        const message = { 
+            id: messages.length + 1, 
+            image_url: data.image_url, 
+            type: 'image', 
+            roomId: data.roomId, 
+            user_id: socket.user.userId, 
+            display_name: socket.user.display_name, 
+            rank: socket.user.rank,
+            profile_image1: socket.user.profile_image1,
+            timestamp: new Date() 
+        };
+        messages.push(message);
+        io.to(data.roomId.toString()).emit('newMessage', message);
+        callback?.({ success: true });
     });
 
     socket.on('sendVoice', (data, callback) => {
-        upload.single('voice')(data, {}, (err) => {
-            if (err) {
-                console.error('Error uploading voice:', err.message);
-                return callback({ error: 'فشل رفع التسجيل الصوتي: ' + err.message });
-            }
-            const isMuted = mutes.find(m => m.user_id === socket.user.userId && 
-                (m.duration === 'permanent' || new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
-            if (isMuted) return callback({ error: 'أنت مكتوم ولا يمكنك إرسال الرسائل الصوتية' });
+        if (!socket.user) return callback?.({ error: 'غير مصرح' });
+        
+        const isMuted = mutes.find(m => m.user_id === socket.user.userId && 
+            (m.duration === 'permanent' || new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
+        if (isMuted) return callback?.({ error: 'أنت مكتوم ولا يمكنك إرسال الرسائل الصوتية' });
 
-            const voiceUrl = `/Uploads/${data.file.filename}`;
-            const message = { 
-                id: messages.length + 1, 
-                voice_url: voiceUrl, 
-                type: 'voice', 
-                roomId: data.roomId, 
-                user_id: socket.user.userId, 
-                display_name: socket.user.display_name, 
-                rank: socket.user.rank, 
-                timestamp: new Date() 
-            };
-            messages.push(message);
-            io.to(data.roomId).emit('newVoice', message);
-            callback({ success: true, voiceUrl });
-        });
+        const message = { 
+            id: messages.length + 1, 
+            voice_url: data.voice_url, 
+            type: 'voice', 
+            roomId: data.roomId, 
+            user_id: socket.user.userId, 
+            display_name: socket.user.display_name, 
+            rank: socket.user.rank,
+            profile_image1: socket.user.profile_image1,
+            timestamp: new Date() 
+        };
+        messages.push(message);
+        io.to(data.roomId.toString()).emit('newMessage', message);
+        callback?.({ success: true });
+    });
+
+    socket.on('sendPrivateImage', (data, callback) => {
+        if (!socket.user) return callback?.({ error: 'غير مصرح' });
+        
+        const message = { 
+            id: privateMessages.length + 1, 
+            senderId: socket.user.userId,
+            senderName: socket.user.display_name,
+            senderRank: socket.user.rank,
+            senderImage: socket.user.profile_image1,
+            receiverId: data.receiverId,
+            image_url: data.image_url, 
+            type: 'image',
+            read: false,
+            timestamp: new Date() 
+        };
+        privateMessages.push(message);
+        
+        const receiverSocket = findSocketByUserId(data.receiverId);
+        if (receiverSocket) {
+            receiverSocket.emit('newPrivateMessage', message);
+        }
+        socket.emit('newPrivateMessage', message);
+        callback?.({ success: true });
     });
 
     socket.on('sendPrivateVoice', (data, callback) => {
-        upload.single('voice')(data, {}, (err) => {
-            if (err) {
-                console.error('Error uploading private voice:', err.message);
-                return callback({ error: 'فشل رفع التسجيل الصوتي: ' + err.message });
-            }
-            const isMuted = mutes.find(m => m.user_id === socket.user.userId && 
-                (m.duration === 'permanent' || new Date() - new Date(m.timestamp) < parseDuration(m.duration)));
-            if (isMuted) return callback({ error: 'أنت مكتوم ولا يمكنك إرسال الرسائل الصوتية' });
-
-            const voiceUrl = `/Uploads/${data.file.filename}`;
-            const message = { 
-                id: privateMessages.length + 1, 
-                voice_url: voiceUrl, 
-                type: 'voice', 
-                receiverId: data.receiverId, 
-                user_id: socket.user.userId, 
-                display_name: socket.user.display_name, 
-                rank: socket.user.rank, 
-                timestamp: new Date() 
-            };
-            privateMessages.push(message);
-            socket.to(data.receiverId).emit('newPrivateVoice', message);
-            socket.emit('newPrivateVoice', message);
-            callback({ success: true, voiceUrl });
-        });
+        if (!socket.user) return callback?.({ error: 'غير مصرح' });
+        
+        const message = { 
+            id: privateMessages.length + 1, 
+            senderId: socket.user.userId,
+            senderName: socket.user.display_name,
+            senderRank: socket.user.rank,
+            senderImage: socket.user.profile_image1,
+            receiverId: data.receiverId,
+            voice_url: data.voice_url, 
+            type: 'voice',
+            read: false,
+            timestamp: new Date() 
+        };
+        privateMessages.push(message);
+        
+        const receiverSocket = findSocketByUserId(data.receiverId);
+        if (receiverSocket) {
+            receiverSocket.emit('newPrivateMessage', message);
+        }
+        socket.emit('newPrivateMessage', message);
+        callback?.({ success: true });
     });
 
     socket.on('deleteRoom', (roomId) => {
+        if (!socket.user) return;
         const user = users.find(u => u.id === socket.user.userId);
-        if (user.role === 'admin') {
+        if (user && (isOwner(user) || user.role === 'admin')) {
+            if (roomId === 1) {
+                socket.emit('error', 'لا يمكن حذف الغرفة الرئيسية');
+                return;
+            }
             rooms = rooms.filter(r => r.id !== roomId);
             io.emit('roomDeleted', roomId);
+            io.emit('roomsUpdated', rooms);
         }
     });
 
@@ -1033,7 +1404,7 @@ io.on('connection', (socket) => {
             mode: data.mode,
             player1: {
                 id: socket.id,
-                userId: data.userId,
+                odId: data.userId,
                 name: data.playerName,
                 symbol: 'X'
             },
@@ -1050,11 +1421,11 @@ io.on('connection', (socket) => {
 
         socket.emit('gameCreated', {
             gameId,
-            shareUrl: `${data.baseUrl || 'http://localhost:3000'}/xo.html?game=${gameId}`,
+            shareUrl: `${data.baseUrl || 'http://localhost:5000'}/xo.html?game=${gameId}`,
             game
         });
 
-        console.log(`✅ تم إنشاء لعبة XO: ${gameId}`);
+        console.log(`تم إنشاء لعبة XO: ${gameId}`);
     });
 
     socket.on('joinXOGame', (data) => {
@@ -1084,7 +1455,7 @@ io.on('connection', (socket) => {
 
         io.to(data.gameId).emit('gameStarted', game);
 
-        console.log(`✅ انضم ${data.playerName} للعبة ${data.gameId}`);
+        console.log(`انضم ${data.playerName} للعبة ${data.gameId}`);
     });
 
     socket.on('makeXOMove', (data) => {
@@ -1166,7 +1537,7 @@ io.on('connection', (socket) => {
         const user = users.find(u => u.id === socket.user?.userId);
 
         if (!canCreateAds(user)) {
-            return socket.emit('adError', { message: '❌ هذه الميزة متاحة للمشرفين والإداريين فقط' });
+            return socket.emit('adError', { message: 'هذه الميزة متاحة للمشرفين والإداريين فقط' });
         }
 
         const newAd = {
@@ -1211,8 +1582,85 @@ io.on('connection', (socket) => {
         });
     });
 
+    socket.on('sendFriendRequest', (data) => {
+        if (!socket.user) return;
+        
+        const targetUser = users.find(u => u.id === data.targetUserId);
+        if (!targetUser) {
+            return socket.emit('friendRequestError', { message: 'المستخدم غير موجود' });
+        }
+        
+        if (!friendRequests[data.targetUserId]) {
+            friendRequests[data.targetUserId] = [];
+        }
+        
+        if (friendRequests[data.targetUserId].some(r => r.userId === socket.user.userId)) {
+            return socket.emit('friendRequestError', { message: 'تم إرسال طلب صداقة مسبقاً' });
+        }
+        
+        friendRequests[data.targetUserId].push({
+            odId: socket.user.odId,
+            userName: socket.user.display_name,
+            userAvatar: socket.user.profile_image1,
+            timestamp: new Date()
+        });
+        
+        const targetSocket = findSocketByUserId(data.targetUserId);
+        if (targetSocket) {
+            targetSocket.emit('newFriendRequest', {
+                userId: socket.user.userId,
+                userName: socket.user.display_name,
+                userAvatar: socket.user.profile_image1
+            });
+        }
+        
+        socket.emit('friendRequestSent', { message: 'تم إرسال طلب الصداقة' });
+    });
+
+    socket.on('acceptFriendRequest', (data) => {
+        if (!socket.user) return;
+        
+        if (!friendsList[socket.user.userId]) {
+            friendsList[socket.user.userId] = [];
+        }
+        if (!friendsList[data.userId]) {
+            friendsList[data.userId] = [];
+        }
+        
+        friendsList[socket.user.userId].push(data.userId);
+        friendsList[data.userId].push(socket.user.userId);
+        
+        if (friendRequests[socket.user.userId]) {
+            friendRequests[socket.user.userId] = friendRequests[socket.user.userId].filter(r => r.userId !== data.userId);
+        }
+        
+        const targetSocket = findSocketByUserId(data.userId);
+        if (targetSocket) {
+            targetSocket.emit('friendRequestAccepted', {
+                odId: socket.user.odId,
+                userName: socket.user.display_name
+            });
+        }
+        
+        socket.emit('friendRequestAccepted', { userId: data.userId });
+    });
+
+    socket.on('rejectFriendRequest', (data) => {
+        if (!socket.user) return;
+        
+        if (friendRequests[socket.user.userId]) {
+            friendRequests[socket.user.userId] = friendRequests[socket.user.userId].filter(r => r.userId !== data.userId);
+        }
+        
+        socket.emit('friendRequestRejected', { userId: data.userId });
+    });
+
     socket.on('disconnect', () => {
         console.log('مستخدم منفصل: ' + socket.id);
+        if (socket.user) {
+            onlineUsers.delete(socket.user.userId);
+            io.emit('onlineUsersUpdated', Array.from(onlineUsers.values()));
+        }
         io.emit('userList', users.filter(u => u.id !== socket.user?.userId));
     });
 });
